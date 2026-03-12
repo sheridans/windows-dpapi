@@ -19,7 +19,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-windows-dpapi = "0.1.0"
+windows-dpapi = "0.2.0"
 ```
 
 Basic usage:
@@ -29,8 +29,8 @@ use windows_dpapi::{encrypt_data, decrypt_data, Scope};
 
 fn main() -> anyhow::Result<()> {
     let secret = b"my secret";
-    let encrypted = encrypt_data(secret, Scope::User)?;
-    let decrypted = decrypt_data(&encrypted, Scope::User)?;
+    let encrypted = encrypt_data(secret, Scope::User, None)?;
+    let decrypted = decrypt_data(&encrypted, Scope::User, None)?;
     assert_eq!(secret, decrypted.as_slice());
     Ok(())
 }
