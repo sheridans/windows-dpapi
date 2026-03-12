@@ -19,10 +19,10 @@
 //! fn main() -> anyhow::Result<()> {
 //!     // Encrypt data for current user only
 //!     let secret = b"my secret data";
-//!     let encrypted = encrypt_data(secret, Scope::User)?;
+//!     let encrypted = encrypt_data(secret, Scope::User, None)?;
 //!
 //!     // Decrypt the data
-//!     let decrypted = decrypt_data(&encrypted, Scope::User)?;
+//!     let decrypted = decrypt_data(&encrypted, Scope::User, None)?;
 //!     assert_eq!(secret, decrypted.as_slice());
 //!     Ok(())
 //! }
@@ -97,6 +97,7 @@ fn to_blob(data: &[u8]) -> DATA_BLOB {
 ///
 /// * `data` - The data to encrypt
 /// * `scope` - The encryption scope (User or Machine)
+/// * `entropy` - Optional additional entropy data to strengthen encryption
 ///
 /// # Returns
 ///
@@ -116,12 +117,13 @@ fn to_blob(data: &[u8]) -> DATA_BLOB {
 ///
 /// fn main() -> anyhow::Result<()> {
 ///     let secret = b"my secret data";
-///     let encrypted = encrypt_data(secret, Scope::User)?;
+///     let entropy = b"my entropy";
+///     let encrypted = encrypt_data(secret, Scope::User, Some(entropy))?;
 ///     Ok(())
 /// }
 /// ```
 #[cfg(windows)]
-pub fn encrypt_data(data: &[u8], scope: Scope) -> Result<Vec<u8>> {
+pub fn encrypt_data(data: &[u8], scope: Scope, entropy: Option<&[u8]>) -> Result<Vec<u8>> {
     log::debug!("Encrypting with DPAPI ({:?} scope)", scope);
 
     let flags = match scope {
@@ -131,6 +133,15 @@ pub fn encrypt_data(data: &[u8], scope: Scope) -> Result<Vec<u8>> {
 
     unsafe {
         let mut input = to_blob(data);
+        let mut entropy_blob = if let Some(ent) = entropy {
+            to_blob(ent)
+        } else {
+            DATA_BLOB {
+                cbData: 0,
+                pbData: ptr::null_mut(),
+            }
+        };
+
         let mut output = DATA_BLOB {
             cbData: 0,
             pbData: ptr::null_mut(),
@@ -139,7 +150,11 @@ pub fn encrypt_data(data: &[u8], scope: Scope) -> Result<Vec<u8>> {
         let success = CryptProtectData(
             &mut input,
             ptr::null(),
-            ptr::null_mut(),
+            if entropy.is_some() {
+                &mut entropy_blob
+            } else {
+                ptr::null_mut()
+            },
             ptr::null_mut(),
             ptr::null_mut(),
             flags,
@@ -162,6 +177,7 @@ pub fn encrypt_data(data: &[u8], scope: Scope) -> Result<Vec<u8>> {
 ///
 /// * `data` - The encrypted data to decrypt
 /// * `scope` - The encryption scope that was used to encrypt the data
+/// * `entropy` - The optional entropy that was used to encrypt the data
 ///
 /// # Returns
 ///
@@ -184,16 +200,17 @@ pub fn encrypt_data(data: &[u8], scope: Scope) -> Result<Vec<u8>> {
 /// fn main() -> anyhow::Result<()> {
 ///     // First encrypt some data
 ///     let secret = b"my secret data";
-///     let encrypted = encrypt_data(secret, Scope::User)?;
+///     let entropy = b"my entropy";
+///     let encrypted = encrypt_data(secret, Scope::User, Some(entropy))?;
 ///     
 ///     // Then decrypt it
-///     let decrypted = decrypt_data(&encrypted, Scope::User)?;
+///     let decrypted = decrypt_data(&encrypted, Scope::User, Some(entropy))?;
 ///     assert_eq!(secret, decrypted.as_slice());
 ///     Ok(())
 /// }
 /// ```
 #[cfg(windows)]
-pub fn decrypt_data(data: &[u8], scope: Scope) -> Result<Vec<u8>> {
+pub fn decrypt_data(data: &[u8], scope: Scope, entropy: Option<&[u8]>) -> Result<Vec<u8>> {
     log::debug!("Decrypting with DPAPI ({:?} scope)", scope);
 
     let flags = match scope {
@@ -203,6 +220,14 @@ pub fn decrypt_data(data: &[u8], scope: Scope) -> Result<Vec<u8>> {
 
     unsafe {
         let mut input = to_blob(data);
+        let mut entropy_blob = if let Some(ent) = entropy {
+            to_blob(ent)
+        } else {
+            DATA_BLOB {
+                cbData: 0,
+                pbData: ptr::null_mut(),
+            }
+        };
         let mut output = DATA_BLOB {
             cbData: 0,
             pbData: ptr::null_mut(),
@@ -211,7 +236,11 @@ pub fn decrypt_data(data: &[u8], scope: Scope) -> Result<Vec<u8>> {
         let success = CryptUnprotectData(
             &mut input,
             ptr::null_mut(),
-            ptr::null_mut(),
+            if entropy.is_some() {
+                &mut entropy_blob
+            } else {
+                ptr::null_mut()
+            },
             ptr::null_mut(),
             ptr::null_mut(),
             flags,
@@ -236,44 +265,145 @@ mod tests {
     #[test]
     fn round_trip_user_scope() {
         let original = b"user secret";
-        let encrypted = encrypt_data(original, Scope::User).expect("User encryption failed");
+        let encrypted = encrypt_data(original, Scope::User, None).expect("User encryption failed");
         assert_ne!(original.to_vec(), encrypted);
-        let decrypted = decrypt_data(&encrypted, Scope::User).expect("User decryption failed");
+        let decrypted =
+            decrypt_data(&encrypted, Scope::User, None).expect("User decryption failed");
+        assert_eq!(original.to_vec(), decrypted);
+    }
+
+    #[test]
+    fn round_trip_user_scope_entropy() {
+        let original = b"user secret";
+        let entropy = b"user entropy";
+        let encrypted =
+            encrypt_data(original, Scope::User, Some(entropy)).expect("User encryption failed");
+        assert_ne!(original.to_vec(), encrypted);
+        let decrypted =
+            decrypt_data(&encrypted, Scope::User, Some(entropy)).expect("User decryption failed");
         assert_eq!(original.to_vec(), decrypted);
     }
 
     #[test]
     fn round_trip_machine_scope() {
         let original = b"machine secret";
-        let encrypted = encrypt_data(original, Scope::Machine).expect("Machine encryption failed");
+        let encrypted =
+            encrypt_data(original, Scope::Machine, None).expect("Machine encryption failed");
         assert_ne!(original.to_vec(), encrypted);
         let decrypted =
-            decrypt_data(&encrypted, Scope::Machine).expect("Machine decryption failed");
+            decrypt_data(&encrypted, Scope::Machine, None).expect("Machine decryption failed");
+        assert_eq!(original.to_vec(), decrypted);
+    }
+
+    #[test]
+    fn round_trip_machine_scope_entropy() {
+        let original = b"machine secret";
+        let entropy = b"user entropy";
+        let encrypted = encrypt_data(original, Scope::Machine, Some(entropy))
+            .expect("Machine encryption failed");
+        assert_ne!(original.to_vec(), encrypted);
+        let decrypted = decrypt_data(&encrypted, Scope::Machine, Some(entropy))
+            .expect("Machine decryption failed");
         assert_eq!(original.to_vec(), decrypted);
     }
 
     #[test]
     fn handles_empty_input() {
         let data = b"";
-        let encrypted = encrypt_data(data, Scope::Machine).expect("Encrypt empty");
-        let decrypted = decrypt_data(&encrypted, Scope::Machine).expect("Decrypt empty");
+        let encrypted = encrypt_data(data, Scope::Machine, None).expect("Encrypt empty");
+        let decrypted = decrypt_data(&encrypted, Scope::Machine, None).expect("Decrypt empty");
+        assert_eq!(data.to_vec(), decrypted);
+    }
+
+    #[test]
+    fn handles_empty_input_entropy() {
+        let data = b"";
+        let entropy = b"random entropy";
+        let encrypted = encrypt_data(data, Scope::Machine, Some(entropy)).expect("Encrypt empty");
+        let decrypted =
+            decrypt_data(&encrypted, Scope::Machine, Some(entropy)).expect("Decrypt empty");
+        assert_eq!(data.to_vec(), decrypted);
+    }
+
+    #[test]
+    fn handles_empty_entropy() {
+        let data = b"random value";
+        let entropy = b"";
+        let encrypted = encrypt_data(data, Scope::Machine, Some(entropy)).expect("Encrypt empty");
+        let decrypted =
+            decrypt_data(&encrypted, Scope::Machine, Some(entropy)).expect("Decrypt empty");
         assert_eq!(data.to_vec(), decrypted);
     }
 
     #[test]
     fn handles_large_input() {
         let data = vec![0xAAu8; 5 * 1024 * 1024];
-        let encrypted = encrypt_data(&data, Scope::Machine).expect("Encrypt large");
-        let decrypted = decrypt_data(&encrypted, Scope::Machine).expect("Decrypt large");
+        let encrypted = encrypt_data(&data, Scope::Machine, None).expect("Encrypt large");
+        let decrypted = decrypt_data(&encrypted, Scope::Machine, None).expect("Decrypt large");
         assert_eq!(data, decrypted);
+    }
+
+    #[test]
+    fn handles_large_input_entropy() {
+        let data = vec![0xAAu8; 5 * 1024 * 1024];
+        let entropy = b"random entropy";
+        let encrypted = encrypt_data(&data, Scope::Machine, Some(entropy)).expect("Encrypt large");
+        let decrypted =
+            decrypt_data(&encrypted, Scope::Machine, Some(entropy)).expect("Decrypt large");
+        assert_eq!(data, decrypted);
+    }
+
+    #[test]
+    fn handles_large_entropy() {
+        let data = b"Random input";
+        let entropy = &vec![0xAAu8; 5 * 1024 * 1024];
+        let encrypted = encrypt_data(data, Scope::Machine, Some(entropy)).expect("Encrypt large");
+        let decrypted =
+            decrypt_data(&encrypted, Scope::Machine, Some(entropy)).expect("Decrypt large");
+        assert_eq!(data.to_vec(), decrypted);
     }
 
     #[test]
     fn fails_on_corrupted_data() {
         let original = b"important";
-        let mut encrypted = encrypt_data(original, Scope::Machine).expect("Encrypt failed");
+        let mut encrypted = encrypt_data(original, Scope::Machine, None).expect("Encrypt failed");
         encrypted[0] ^= 0xFF;
-        let result = decrypt_data(&encrypted, Scope::Machine);
+        let result = decrypt_data(&encrypted, Scope::Machine, None);
         assert!(result.is_err(), "Corrupted data should fail");
+    }
+    #[test]
+    fn fails_on_corrupted_data_entropy() {
+        let original = b"important";
+        let entropy = b"entropy";
+        let mut encrypted =
+            encrypt_data(original, Scope::Machine, Some(entropy)).expect("Encrypt failed");
+        encrypted[0] ^= 0xFF;
+        let result = decrypt_data(&encrypted, Scope::Machine, Some(entropy));
+        assert!(result.is_err(), "Corrupted data should fail");
+    }
+
+    #[test]
+    fn fails_on_wrong_entropy() {
+        let original = b"user secret";
+        let entropy = b"user entropy";
+        let bad_entropy = b"bad entropy";
+        let encrypted =
+            encrypt_data(original, Scope::User, Some(entropy)).expect("User encryption failed");
+        assert_ne!(original.to_vec(), encrypted);
+        let result = decrypt_data(&encrypted, Scope::User, Some(bad_entropy));
+        assert!(result.is_err(), "Wrong entropy should fail");
+    }
+
+    #[test]
+    fn entropy_encrypts_differently() {
+        let original = b"user secret";
+        let entropy = b"user entropy";
+        let bad_entropy = b"bad entropy";
+        let encrypted =
+            encrypt_data(original, Scope::User, Some(entropy)).expect("User encryption failed");
+        assert_ne!(original.to_vec(), encrypted);
+        let other_encrypted =
+            encrypt_data(original, Scope::User, Some(bad_entropy)).expect("User encryption failed");
+        assert_ne!(encrypted, other_encrypted);
     }
 }
